@@ -31,6 +31,9 @@ def jcs(value):
 def configuration(value, project_revision):
     diagram = {
         "document_kind": "s7.diagram",
+        # A Constant pins no rate of its own: the diagram's dt seeds it, or a
+        # real node refuses the graph (doc/S7_Sample_Rate_Model.md).
+        "dt": 1,
         "runtime_nodes": [{"node_uuid": NODE, "name": "fixture-node", "endpoint": "wss://127.0.0.1:9002"}],
         "schema": {"name": "fixture", "elements": [{"id": "c", "type": "Constant", "params": {"value": value}, "node": NODE}],
                    "connections": []},

@@ -216,6 +216,7 @@
             "project_revision": "fixture:1",
             "diagram": {
               "document_kind": "s7.diagram",
+              "dt": 1,
               "runtime_nodes": [
                 {
                   "node_uuid": "11111111-2222-3333-4444-555555555555",
@@ -238,7 +239,7 @@
                 "connections": []
               }
             },
-            "configuration_digest": "sha256:a2d6231e0da0b3b10d7169efcef143a869c20258fac5be6213c602b405a57ab8"
+            "configuration_digest": "sha256:b136b1b2abdec928a326157e74b186eaf26e0ef586dbcc9fed8753334cd9604e"
           }
         }
       },
@@ -272,6 +273,7 @@
             "project_revision": "fixture:1",
             "diagram": {
               "document_kind": "s7.diagram",
+              "dt": 1,
               "runtime_nodes": [
                 {
                   "node_uuid": "11111111-2222-3333-4444-555555555555",
@@ -294,7 +296,7 @@
                 "connections": []
               }
             },
-            "configuration_digest": "sha256:a2d6231e0da0b3b10d7169efcef143a869c20258fac5be6213c602b405a57ab8"
+            "configuration_digest": "sha256:b136b1b2abdec928a326157e74b186eaf26e0ef586dbcc9fed8753334cd9604e"
           }
         }
       },
@@ -316,7 +318,7 @@
         },
         "equals": {
           "prepare_status": "READY",
-          "configuration_digest": "sha256:a2d6231e0da0b3b10d7169efcef143a869c20258fac5be6213c602b405a57ab8"
+          "configuration_digest": "sha256:b136b1b2abdec928a326157e74b186eaf26e0ef586dbcc9fed8753334cd9604e"
         }
       },
       "capture": {
@@ -338,6 +340,7 @@
             "project_revision": "fixture:1",
             "diagram": {
               "document_kind": "s7.diagram",
+              "dt": 1,
               "runtime_nodes": [
                 {
                   "node_uuid": "11111111-2222-3333-4444-555555555555",
@@ -360,7 +363,7 @@
                 "connections": []
               }
             },
-            "configuration_digest": "sha256:a2d6231e0da0b3b10d7169efcef143a869c20258fac5be6213c602b405a57ab8"
+            "configuration_digest": "sha256:b136b1b2abdec928a326157e74b186eaf26e0ef586dbcc9fed8753334cd9604e"
           }
         }
       },
@@ -400,6 +403,7 @@
             "project_revision": "tampered",
             "diagram": {
               "document_kind": "s7.diagram",
+              "dt": 1,
               "runtime_nodes": [
                 {
                   "node_uuid": "11111111-2222-3333-4444-555555555555",
@@ -422,7 +426,7 @@
                 "connections": []
               }
             },
-            "configuration_digest": "sha256:a2d6231e0da0b3b10d7169efcef143a869c20258fac5be6213c602b405a57ab8"
+            "configuration_digest": "sha256:b136b1b2abdec928a326157e74b186eaf26e0ef586dbcc9fed8753334cd9604e"
           }
         }
       },
@@ -617,7 +621,7 @@
         "equals": {
           "revision": 1,
           "project_revision": "fixture:1",
-          "configuration_digest": "sha256:a2d6231e0da0b3b10d7169efcef143a869c20258fac5be6213c602b405a57ab8"
+          "configuration_digest": "sha256:b136b1b2abdec928a326157e74b186eaf26e0ef586dbcc9fed8753334cd9604e"
         }
       }
     },
@@ -629,8 +633,8 @@
         "request_id": "begin-1",
         "protocol_version": 1,
         "transfer_id": "fixture-transfer",
-        "total_bytes": 479,
-        "configuration_digest": "sha256:99c66d6c17d1f2467d2c5c031e75cf12c37a94967b8556f427e550a18c90295e"
+        "total_bytes": 488,
+        "configuration_digest": "sha256:a68344474940b4871aea3bbf67093e3b9fe80d1deb589a47305d5b8f32bf10a0"
       },
       "response": {
         "type": "CONFIGURATION_TRANSFER_STARTED",
@@ -653,7 +657,7 @@
         "transfer_id": "fixture-transfer",
         "index": 0,
         "offset": 0,
-        "data": "eyJwcm9qZWN0X3JldmlzaW9uIjogImZpeHR1cmU6MiIsICJkaWFncmFtIjogeyJkb2N1bWVudF9raW5kIjogInM3LmRpYWdyYW0iLCAicnVudGltZV9ub2RlcyI6IFt7Im5vZGVfdXVpZCI6ICIxMTExMTExMS0yMjIyLTMzMzMtNDQ0NC01NTU1NTU1NTU1NTUiLCAibmFtZSI6ICJmaXh0dXJlLW5vZGUiLCAiZW5kcG9pbnQiOiAid3NzOi8vMTI3LjAuMC4xOjkwMDIifV0sICJzY2hlbWEiOiB7Im5hbWUiOiAiZml4dHVyZSIsICJlbGVtZW50cyI6IFt7ImlkIjogImMiLCAidHlwZSI6ICJDb25zdGFudCIsICJwYXJhbXMiOiB7InZhbHVlIjogNX0sICJub2RlIjogIjExMTExMTExLTIyMjItMzMzMy00NDQ0LTU1NTU1NTU1NTU1NSJ9XSwgImNvbm5lY3Rpb25zIjogW119fSwgImNvbmZpZ3VyYXRpb25fZGlnZXN0IjogInNoYTI1Njo5OWM2NmQ2YzE3ZDFmMjQ2N2QyYzVjMDMxZTc1Y2YxMmMzN2E5NDk2N2I4NTU2ZjQyN2U1NTBhMThjOTAyOTVlIn0"
+        "data": "eyJwcm9qZWN0X3JldmlzaW9uIjogImZpeHR1cmU6MiIsICJkaWFncmFtIjogeyJkb2N1bWVudF9raW5kIjogInM3LmRpYWdyYW0iLCAiZHQiOiAxLCAicnVudGltZV9ub2RlcyI6IFt7Im5vZGVfdXVpZCI6ICIxMTExMTExMS0yMjIyLTMzMzMtNDQ0NC01NTU1NTU1NTU1NTUiLCAibmFtZSI6ICJmaXh0dXJlLW5vZGUiLCAiZW5kcG9pbnQiOiAid3NzOi8vMTI3LjAuMC4xOjkwMDIifV0sICJzY2hlbWEiOiB7Im5hbWUiOiAiZml4dHVyZSIsICJlbGVtZW50cyI6IFt7ImlkIjogImMiLCAidHlwZSI6ICJDb25zdGFudCIsICJwYXJhbXMiOiB7InZhbHVlIjogNX0sICJub2RlIjogIjExMTExMTExLTIyMjItMzMzMy00NDQ0LTU1NTU1NTU1NTU1NSJ9XSwgImNvbm5lY3Rpb25zIjogW119fSwgImNvbmZpZ3VyYXRpb25fZGlnZXN0IjogInNoYTI1NjphNjgzNDQ0NzQ5NDBiNDg3MWFlYTNiYmY2NzA5M2UzYjlmZTgwZDFkZWI1ODlhNDczMDVkNWI4ZjMyYmYxMGEwIn0"
       },
       "response": {
         "type": "CONFIGURATION_CHUNK_ACCEPTED",
@@ -666,7 +670,7 @@
           "received_bytes": "integer"
         },
         "equals": {
-          "received_bytes": 479
+          "received_bytes": 488
         }
       }
     },
@@ -717,7 +721,7 @@
           "total_bytes": "integer"
         },
         "equals": {
-          "configuration_digest": "sha256:99c66d6c17d1f2467d2c5c031e75cf12c37a94967b8556f427e550a18c90295e"
+          "configuration_digest": "sha256:a68344474940b4871aea3bbf67093e3b9fe80d1deb589a47305d5b8f32bf10a0"
         }
       }
     },
@@ -825,6 +829,7 @@
             "project_revision": "fixture:large",
             "diagram": {
               "document_kind": "s7.diagram",
+              "dt": 1,
               "runtime_nodes": [
                 {
                   "node_uuid": "11111111-2222-3333-4444-555555555555",
@@ -847,7 +852,7 @@
                 "connections": []
               }
             },
-            "configuration_digest": "sha256:487838ba29c1880c61a12b822e3721630f17c5b0a0f8d07e351b806681958620"
+            "configuration_digest": "sha256:4aaa5db0f032b721ce1cba063bf4d0c9272c0748dd10006ef5495f45976f78e7"
           }
         }
       },

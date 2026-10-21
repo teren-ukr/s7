@@ -12,7 +12,7 @@ import asyncio
 from dataclasses import dataclass
 
 from .clock import utc_now_ns
-from .graph import Graph
+from .graph import Graph, rate_from_step_ns, schema_rate
 
 BEHIND_REPORT_NS = 50_000_000
 MAX_STEPS_PER_TURN = 1000  # then yield, so control requests are still served while catching up
@@ -42,8 +42,16 @@ class Executor:
     # ---- DeploymentHost ---------------------------------------------------------
 
     def stage(self, node_schema: dict, step_ns: int | None) -> Staged:
-        """Compiles without running; raises SchemaError for a fragment that does not build or validate."""
-        return Staged(Graph(node_schema), step_ns)
+        """Compiles without running; raises SchemaError for a fragment that does not build or validate.
+
+        The diagram's model-time step, exact in nanoseconds, seeds the rate of every element
+        that pins none and must equal the rate of every element that pins one (GraphHost::stage);
+        a deployed graph never carries the node's step rate."""
+        rate = rate_from_step_ns(step_ns) if step_ns else schema_rate(node_schema)
+        graph = Graph(node_schema, rate)
+        if step_ns:
+            graph.require_model_time_rate(rate)
+        return Staged(graph, step_ns)
 
     def activate(self, staged: Staged, activate_at_ns: int | None) -> None:
         """Runs the staged graph from activate_at_ns (the previous one runs until then), or at once."""

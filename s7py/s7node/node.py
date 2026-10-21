@@ -16,7 +16,7 @@ from pathlib import Path
 from . import __version__
 from .clock import Clock
 from .control import Authorization, ControlPlane, Descriptor
-from .graph import ELEMENT_TYPES, Graph, SchemaError
+from .graph import ELEMENT_TYPES, Graph, SchemaError, schema_rate
 from .runtime import Executor
 from .tls import ControlPeer, certificate_node_uuid, control_peer, load_certificate_file, server_context
 from .websocket import WebSocketError, accept
@@ -55,7 +55,7 @@ class NodeConfig:
         self.clock = Clock(float(clock.get("max_error_ms", 250.0)), bool(clock.get("assume_synchronized", False)))
         self.step_rate_hz = float(document.get("execution", {}).get("step_rate_hz", 0.0))
         self.node_name = document.get("node_name")
-        self.startup_schema = {k: document[k] for k in ("name", "elements", "connections") if k in document}
+        self.startup_schema = {k: document[k] for k in ("name", "dt", "elements", "connections") if k in document}
 
     @classmethod
     def load(cls, path: str | None) -> "NodeConfig":
@@ -167,7 +167,9 @@ class Node:
 
     async def serve(self, seconds: float | None = None) -> None:
         if not self.control.restore_deployment() and self.config.startup_schema.get("elements"):
-            self.executor.run_startup(Graph(self.config.startup_schema))
+            # Seeded by its own dt, else the rate it is stepped at (s7runtime build_schema_from_definition).
+            rate = schema_rate(self.config.startup_schema, self.executor.step_rate_hz)
+            self.executor.run_startup(Graph(self.config.startup_schema, rate))
         server = await asyncio.start_server(self._serve_connection, self.config.bind_address, self.config.port,
                                             ssl=self.ssl, limit=MAX_CONTROL_MESSAGE_BYTES)
         d = self.descriptor
@@ -232,7 +234,7 @@ def main(argv=None) -> int:
         asyncio.run(run())
     except KeyboardInterrupt:
         pass
-    except OSError as ex:
+    except (OSError, SchemaError) as ex:  # SchemaError: the startup graph does not build
         print(f"error: {ex}", file=sys.stderr)
         return 1
     return 0
