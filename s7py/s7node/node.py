@@ -16,9 +16,11 @@ from pathlib import Path
 from . import __version__
 from .clock import Clock
 from .control import Authorization, ControlPlane, Descriptor
-from .graph import ELEMENT_TYPES, Graph, SchemaError, schema_rate
+from .graph import ELEMENT_TYPES, NET, Graph, SchemaError, schema_rate
 from .runtime import Executor
-from .tls import ControlPeer, certificate_node_uuid, control_peer, load_certificate_file, server_context
+from .stream import CLOCK_UNSYNCHRONIZED, FileSequenceStore
+from .tls import ControlPeer, certificate_node_uuid, client_context, control_peer, load_certificate_file, server_context
+from .transport import NODE_HEADER, DataEndpoint, StreamTable
 from .websocket import WebSocketError, accept
 
 MAX_CONTROL_MESSAGE_BYTES = 4 * 1024 * 1024
@@ -133,25 +135,29 @@ class Node:
         if certificate and not certificate.common_name:
             del self.descriptor.certificate["common_name"]
         self.executor = Executor(config.step_rate_hz if step_rate_hz is None else step_rate_hz, log=log)
+        # Data streams: sequence reservations in <state-dir>/streams, as the C++ node keeps them.
+        self.streams = StreamTable(FileSequenceStore(state.path / "streams"))
+        NET.table = self.streams
+        client_ssl = (lambda: client_context(config.ca_file, config.cert_file, config.key_file)) if config.tls else None
+        self.data = DataEndpoint(self.streams, node_uuid, client_ssl=client_ssl, tls_enabled=config.tls, log=log)
+        self.executor.network = self.data
         self.control = ControlPlane(
             self.descriptor, self.executor, config.clock, state_dir=state.path, authorization=config.authorization,
-            max_configuration_bytes=config.max_configuration_bytes, log=log,
+            max_configuration_bytes=config.max_configuration_bytes, streams=self.streams, data=self.data, log=log,
         )
         self.ssl = server_context(config.cert_file, config.key_file, config.ca_file) if config.tls else None
 
     async def _serve_connection(self, reader, writer) -> None:
         try:
-            ws = await accept(reader, writer, paths=("/control", "/data"), max_message_bytes=MAX_CONTROL_MESSAGE_BYTES)
+            ws = await accept(reader, writer, paths=("/control", "/data"), max_message_bytes=MAX_CONTROL_MESSAGE_BYTES,
+                              response_headers={NODE_HEADER: self.descriptor.node_uuid})
         except (WebSocketError, ConnectionError, OSError):
             writer.close()
             return
         if ws is None:
             return
         if ws.path == "/data":
-            # C++ peers open their data connection along with the control one. Without
-            # a data plane this node has no streams, so nothing should arrive; drop it.
-            while await ws.recv() is not None:
-                pass
+            await self.data.serve_inbound(ws, ws.headers.get(NODE_HEADER.lower(), ""))
             return
         try:
             peer = control_peer(ws.ssl_object)
@@ -164,6 +170,21 @@ class Node:
                 await ws.close(1003, "text messages only")
                 break
             await ws.send(self.control.handle_json(peer, message))
+
+    async def _watch_clock(self) -> None:
+        """SEND_TIME only from a synchronized clock; losing synchronization is noted on every stream."""
+        usable = True
+        while True:
+            sync = self.config.clock.sync()
+            now_usable = self.config.clock.usable(sync)
+            if now_usable != usable:
+                detail = f"synchronized={'true' if sync.synchronized else 'false'} max_error_ns={sync.max_error_ns}"
+                log(f"runtime.clock.usable={'true' if now_usable else 'false'} {detail}")
+                if usable and not now_usable:
+                    self.streams.note_all(CLOCK_UNSYNCHRONIZED, detail)
+                self.streams.set_clock_usable(now_usable)
+                usable = now_usable
+            await asyncio.sleep(1.0)
 
     async def serve(self, seconds: float | None = None) -> None:
         if not self.control.restore_deployment() and self.config.startup_schema.get("elements"):
@@ -180,6 +201,8 @@ class Node:
         if not self.config.authorization.configured():
             log("runtime.control.authorized_studio=none (deployments are refused)")
         stepping = asyncio.create_task(self.executor.run())
+        ticks = self.data.start()
+        clock = asyncio.create_task(self._watch_clock())
         try:
             async with server:
                 if seconds is None:
@@ -188,6 +211,8 @@ class Node:
                     await asyncio.sleep(seconds)
         finally:
             stepping.cancel()
+            ticks.cancel()
+            clock.cancel()
             log(f"runtime.execution.steps={self.executor.graph.steps if self.executor.graph else 0}")
 
 

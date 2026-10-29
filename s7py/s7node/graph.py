@@ -13,6 +13,8 @@ step (doc/S7_Formal_Model.md, "Causal Memory").
 """
 import math
 import operator
+import struct
+import time
 from fractions import Fraction
 
 
@@ -691,8 +693,162 @@ ELEMENT_TYPES: dict[str, type[Element]] = {
     "PhaseWrap": PhaseWrap,
 }
 
-# Data-plane elements a node fragment may contain; s7py has no data plane yet.
-STREAM_ELEMENTS = ("NetSink", "NetSource")
+
+# ---- network boundary: data streams to other nodes (s7net net.hpp) --------------------
+
+class NetContext:
+    """The node's stream table (transport.StreamTable); None: a local run without peers, where
+    NetSink drops its input and NetSource outputs nothing new."""
+
+    table = None
+
+
+NET = NetContext()
+NET_PARAMS = GENERIC + ("stream_id", "max_elements_per_packet", "max_batch_latency_ms", "send_log_max_packets",
+                        "max_block_ms", "max_wait_ms", "producer_node", "consumer_nodes", "max_latency_ms",
+                        "sample_rate", "timestamps")
+_INT64_MAX = 2**63 - 1
+
+
+def _net_config(params: dict, type_name: str):
+    """config_from_params (net.cpp): the stream of a NetSink / NetSource."""
+    from . import stream, wire
+
+    if "stream_id" not in params:
+        raise SchemaError(f"{type_name} needs a 'stream_id' (UUID).")
+    if not isinstance(params["stream_id"], str):
+        raise SchemaError("parameter 'stream_id' must be a string")
+    try:
+        config = stream.StreamConfig(wire.parse_stream_id(params["stream_id"]), wire.wire_type("F64"))
+    except ValueError as error:
+        raise SchemaError(str(error)) from None
+
+    def count(name: str, fallback: int) -> int:
+        value = _integer(params, name, fallback, -_INT64_MAX - 1, _INT64_MAX)
+        zero_allowed = name in ("max_batch_latency_ms", "max_block_ms", "max_wait_ms")
+        if value < 0 or (value == 0 and not zero_allowed):
+            raise SchemaError(f"{type_name} parameter '{name}' is out of range.")
+        return value
+
+    config.max_elements_per_packet = count("max_elements_per_packet", config.max_elements_per_packet)
+    config.max_batch_latency_ms = count("max_batch_latency_ms", config.max_batch_latency_ms)
+    config.send_log_max_packets = count("send_log_max_packets", config.send_log_max_packets)
+    config.max_block_ms = count("max_block_ms", config.max_block_ms)
+    config.max_wait_ms = count("max_wait_ms", config.max_wait_ms)
+    for name in ("producer_node",):
+        if name in params and not isinstance(params[name], str):
+            raise SchemaError(f"parameter '{name}' must be a string")
+    config.producer_node = params.get("producer_node", "")
+    if "max_latency_ms" in params:
+        config.max_latency_ms = _integer(params, "max_latency_ms", 0, -_INT64_MAX - 1, _INT64_MAX)
+    for name in ("sample_rate", "timestamps", "consumer_nodes"):
+        if name in params and not isinstance(params[name], list):
+            raise SchemaError(f"parameter '{name}' must be an array")
+    if "sample_rate" in params:
+        pair = params["sample_rate"]
+        if len(pair) != 2 or not all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in pair):
+            raise SchemaError(f"{type_name} parameter 'sample_rate' must be [numerator, denominator], both positive.")
+        config.sample_rate = (pair[0], pair[1])
+    if "timestamps" in params:
+        roles = []
+        for role in params["timestamps"]:
+            if not isinstance(role, str):
+                raise SchemaError(f"{type_name} parameter 'timestamps' must list role names.")
+            if role not in wire.ROLES:
+                raise SchemaError(f"Unknown timestamp role '{role}' (MODEL_TIME, SOURCE_TIME or PROCESSING_TIME).")
+            roles.append(wire.ROLES[role])
+        if len(set(roles)) != len(roles):
+            raise SchemaError(f"{type_name} parameter 'timestamps' repeats a role.")
+        config.timestamp_roles = sorted(roles)
+    if "consumer_nodes" in params:
+        if not all(isinstance(node, str) for node in params["consumer_nodes"]):
+            raise SchemaError(f"{type_name} parameter 'consumer_nodes' must list node UUIDs.")
+        config.consumer_nodes = list(params["consumer_nodes"])
+    return config
+
+
+class NetStreamElement(Element):
+    """A stream end. Opens its stream on the first step and closes it with the graph; a redeployed
+    graph reopens it and continues it. A stream fault makes the step raise."""
+
+    params = NET_PARAMS
+    stateful = True
+    role = ""
+
+    def __init__(self, element_id, params):
+        super().__init__(element_id, params)
+        self.config = _net_config(params, type(self).__name__)
+        self.handle = None
+        self.table = None
+
+    def ensure_stream(self) -> bool:
+        if self.handle is not None:
+            return True
+        if NET.table is None:
+            return False
+        self.table = NET.table
+        self.handle = self.table.open(self.config, self.role)
+        return True
+
+    def close(self) -> None:
+        if self.handle is not None:
+            self.table.close(self.handle)
+            self.handle = None
+
+    def raise_fault(self, code: str):
+        from . import wire
+        raise RuntimeError(f"{type(self).__name__} stream {wire.stream_id_text(self.config.stream_id)} faulted: {code}.")
+
+
+class NetSink(NetStreamElement):
+    """Publishes its input to the stream. Without a sample rate it stamps PROCESSING_TIME (UTC)."""
+
+    role = "producer"
+    input_count = 1
+    output_count = 0
+
+    def __init__(self, element_id, params):
+        super().__init__(element_id, params)
+        from . import wire
+        if self.config.explicit_timestamps and any(role != wire.PROCESSING_TIME for role in self.config.timestamp_roles):
+            role = next(r for r in self.config.timestamp_roles if r != wire.PROCESSING_TIME)
+            raise SchemaError(f"NetSink stream {wire.stream_id_text(self.config.stream_id)}: {wire.ROLE_NAMES[role]} without "
+                              "a sample_rate is not supported (a NetSink stamps PROCESSING_TIME only).")
+
+    def step(self, inputs):
+        if not self.ensure_stream():
+            return  # no network endpoint: a local run without peers
+        bits = int.from_bytes(struct.pack("<d", inputs[0]), "little")
+        times = []
+        if self.config.explicit_timestamps:
+            now = time.time_ns()
+            times = [(role, now) for role in self.config.timestamp_roles]
+        fault = self.table.publish(self.handle, [(bits,)], times)
+        if fault:
+            self.raise_fault(fault)
+
+
+class NetSource(NetStreamElement):
+    """Outputs the next value of the stream, waiting for it (up to max_wait_ms)."""
+
+    role = "consumer"
+
+    def __init__(self, element_id, params):
+        super().__init__(element_id, params)
+        self.last_timestamps = []  # the times of the value output by the last step (empty: unknown)
+
+    def step(self, inputs):
+        if not self.ensure_stream():
+            return
+        elements, fault, times = self.table.receive(self.handle, 1)
+        if elements:
+            self.outputs[0] = struct.unpack("<d", elements[0][0].to_bytes(8, "little"))[0]
+        if fault:
+            self.raise_fault(fault)
+        self.last_timestamps = times
+
+
+ELEMENT_TYPES.update({"NetSink": NetSink, "NetSource": NetSource})
 
 
 def _index(value, what: str) -> int:
@@ -726,8 +882,6 @@ class Graph:
                 raise SchemaError(f"duplicate element id '{element_id}'")
             if "schema" in entry:
                 raise SchemaError(f"element '{element_id}': nested schemas are not supported by s7py")
-            if type_name in STREAM_ELEMENTS:
-                raise SchemaError(f"element '{element_id}': data streams ({type_name}) are not supported by s7py")
             if type_name not in ELEMENT_TYPES:
                 raise SchemaError(f"element '{element_id}': unknown element type '{type_name}'")
             params = entry.get("params", {})
@@ -938,6 +1092,12 @@ class Graph:
         finally:
             for element, values in zip(trial, base):
                 element.outputs[:] = values
+
+    def close(self) -> None:
+        """Releases the graph's streams, so that a graph replacing it continues them."""
+        for element in self.elements.values():
+            if isinstance(element, NetStreamElement):
+                element.close()
 
     def sample(self, element_id: str, port: int = 0) -> float:
         return self.elements[element_id].outputs[port]

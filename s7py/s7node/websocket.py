@@ -53,7 +53,9 @@ def _headers(lines: list[str]) -> dict[str, str]:
 
 
 class WebSocket:
-    def __init__(self, reader, writer, *, is_client: bool, max_message_bytes: int, path: str = "/"):
+    def __init__(self, reader, writer, *, is_client: bool, max_message_bytes: int, path: str = "/",
+                 headers: dict[str, str] | None = None):
+        self.headers = headers or {}  # the peer's handshake headers, lower-case names
         self.reader = reader
         self.writer = writer
         self.is_client = is_client
@@ -163,8 +165,14 @@ class WebSocket:
             return None
 
 
-async def accept(reader, writer, *, paths: tuple[str, ...], max_message_bytes: int) -> WebSocket | None:
-    """Server side of the opening handshake; None (after an HTTP error) if refused."""
+def _header_lines(headers: dict[str, str] | None) -> str:
+    return "".join(f"{name}: {value}\r\n" for name, value in (headers or {}).items())
+
+
+async def accept(reader, writer, *, paths: tuple[str, ...], max_message_bytes: int,
+                 response_headers: dict[str, str] | None = None) -> WebSocket | None:
+    """Server side of the opening handshake; None (after an HTTP error) if refused. response_headers
+    are added to the response; the request's headers are on the returned WebSocket."""
 
     async def refuse(status: str) -> None:
         writer.write(f"HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode("ascii"))
@@ -189,28 +197,30 @@ async def accept(reader, writer, *, paths: tuple[str, ...], max_message_bytes: i
             "HTTP/1.1 101 Switching Protocols\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Accept: {_accept_key(headers['sec-websocket-key'])}\r\n\r\n"
+            f"Sec-WebSocket-Accept: {_accept_key(headers['sec-websocket-key'])}\r\n"
+            f"{_header_lines(response_headers)}\r\n"
         ).encode("ascii")
     )
     await writer.drain()
-    return WebSocket(reader, writer, is_client=False, max_message_bytes=max_message_bytes, path=path)
+    return WebSocket(reader, writer, is_client=False, max_message_bytes=max_message_bytes, path=path, headers=headers)
 
 
-async def connect(host: str, port: int, path: str, *, ssl=None, max_message_bytes: int = 4 * 1024 * 1024) -> WebSocket:
-    """Client side: opens a connection and performs the handshake."""
+async def connect(host: str, port: int, path: str, *, ssl=None, max_message_bytes: int = 4 * 1024 * 1024,
+                  headers: dict[str, str] | None = None) -> WebSocket:
+    """Client side: opens a connection and performs the handshake, sending headers with the request."""
     reader, writer = await asyncio.open_connection(host, port, ssl=ssl, limit=_MAX_HEADER_BYTES * 2)
     key = base64.b64encode(os.urandom(16)).decode("ascii")
     writer.write(
         (
             f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
             "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n{_header_lines(headers)}\r\n"
         ).encode("ascii")
     )
     await writer.drain()
     lines = await _read_http_head(reader)
-    headers = _headers(lines[1:])
-    if " 101 " not in lines[0] + " " or headers.get("sec-websocket-accept") != _accept_key(key):
+    received = _headers(lines[1:])
+    if " 101 " not in lines[0] + " " or received.get("sec-websocket-accept") != _accept_key(key):
         writer.close()
         raise WebSocketError(f"handshake refused: {lines[0]}")
-    return WebSocket(reader, writer, is_client=True, max_message_bytes=max_message_bytes, path=path)
+    return WebSocket(reader, writer, is_client=True, max_message_bytes=max_message_bytes, path=path, headers=received)

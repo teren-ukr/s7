@@ -7,9 +7,14 @@ A deployed graph with a model-time step dt runs on a UTC grid: step n is due
 at origin + n * dt, origin being its activation time. A node that falls behind
 runs the missed steps at once. A graph without dt (and the startup graph) steps
 at the node's step_rate_hz, or not at all when that is 0.
+
+Steps run in a worker thread, so that a NetSink or NetSource may block (backpressure,
+waiting for data) while the event loop keeps serving connections. A failed step (for
+example a stream fault) stops stepping; RECOVER_STREAM resumes it. A replaced graph
+releases its streams once its running step has finished, so the new graph continues them.
 """
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .clock import utc_now_ns
 from .graph import Graph, rate_from_step_ns, schema_rate
@@ -22,6 +27,7 @@ MAX_STEPS_PER_TURN = 1000  # then yield, so control requests are still served wh
 class Staged:
     graph: Graph
     step_ns: int | None  # model-time step; None: untimed
+    data_peers: list = field(default_factory=list)  # transport.DataPeer: producer nodes of its consumed streams
 
 
 class Executor:
@@ -38,10 +44,13 @@ class Executor:
         self._wake = asyncio.Event()
         self._watches: list[str] = []
         self._last_watch_ns = 0
+        self.network = None  # transport.DataEndpoint, when the node has one
+        self._retired: list[Graph] = []  # replaced graphs whose streams are released after their last step
+        self._step_running = False
 
     # ---- DeploymentHost ---------------------------------------------------------
 
-    def stage(self, node_schema: dict, step_ns: int | None) -> Staged:
+    def stage(self, node_schema: dict, step_ns: int | None, data_peers=()) -> Staged:
         """Compiles without running; raises SchemaError for a fragment that does not build or validate.
 
         The diagram's model-time step, exact in nanoseconds, seeds the rate of every element
@@ -51,7 +60,7 @@ class Executor:
         graph = Graph(node_schema, rate)
         if step_ns:
             graph.require_model_time_rate(rate)
-        return Staged(graph, step_ns)
+        return Staged(graph, step_ns, list(data_peers))
 
     def activate(self, staged: Staged, activate_at_ns: int | None) -> None:
         """Runs the staged graph from activate_at_ns (the previous one runs until then), or at once."""
@@ -83,12 +92,33 @@ class Executor:
     def watch(self, element_ids: list[str]) -> None:
         self._watches = element_ids
 
+    def resume(self) -> None:
+        """After RECOVER_STREAM: a stopped graph steps again."""
+        if self.stopped:
+            self.stopped = False
+            self.log("runtime.execution.resumed")
+        self._wake.set()
+
     def _swap(self, staged: Staged, origin_ns: int) -> None:
+        if self.graph is not None:
+            self._retired.append(self.graph)
+            self._release_retired()
         self.graph, self.step_ns, self.origin_ns = staged.graph, staged.step_ns, origin_ns
         self.lag_ns = self.max_lag_ns = 0
         self.stopped = False
         self.log(f"runtime.graph.active name={staged.graph.name} elements={len(staged.graph.elements)} "
                  f"pacing={self.timing()['pacing']}")
+        if self.network is not None:
+            try:
+                self.network.set_data_peers(staged.data_peers)
+            except ValueError as error:
+                self.log(f"runtime.transport.error={error}")
+
+    def _release_retired(self) -> None:
+        if not self._step_running:
+            for graph in self._retired:
+                graph.close()
+            self._retired.clear()
 
     def _period_ns(self) -> int | None:
         if self.graph is None:
@@ -107,14 +137,18 @@ class Executor:
             period = self._period_ns()
             wait_ns = 500_000_000
             if period and not self.stopped:
-                due = self.origin_ns + self.graph.steps * period
-                ran = 0
-                while due <= now and ran < MAX_STEPS_PER_TURN:
-                    if not self._step(now - due):
-                        break
-                    ran += 1
-                    due += period
-                wait_ns = min(wait_ns, max(0, due - utc_now_ns()))
+                graph = self.graph
+                if self.origin_ns + graph.steps * period <= now:
+                    self._step_running = True
+                    try:
+                        await asyncio.to_thread(self._run_due, graph, now, period)
+                    finally:
+                        self._step_running = False
+                        self._release_retired()
+                if self.graph is graph:
+                    wait_ns = min(wait_ns, max(0, self.origin_ns + graph.steps * period - utc_now_ns()))
+                else:
+                    wait_ns = 0
             if self.pending:
                 wait_ns = min(wait_ns, max(0, self.pending[1] - utc_now_ns()))
             self._report_watches(now)
@@ -124,12 +158,22 @@ class Executor:
             except asyncio.TimeoutError:
                 pass
 
-    def _step(self, lag_ns: int) -> bool:
+    def _run_due(self, graph: Graph, now: int, period: int) -> None:
+        """Worker thread: the steps due by now (at most MAX_STEPS_PER_TURN), while this graph is active."""
+        due = self.origin_ns + graph.steps * period
+        ran = 0
+        while due <= now and ran < MAX_STEPS_PER_TURN and self.graph is graph and not self.stopped:
+            if not self._step(graph, now - due):
+                break
+            ran += 1
+            due += period
+
+    def _step(self, graph: Graph, lag_ns: int) -> bool:
         try:
-            self.graph.step()
+            graph.step()
         except Exception as ex:
             self.stopped = True
-            self.log(f"runtime.execution.stopped=error step={self.graph.steps} error={ex}")
+            self.log(f"runtime.execution.stopped=error step={graph.steps} error={ex}")
             return False
         if self.step_ns:
             if lag_ns > self.step_ns and lag_ns > BEHIND_REPORT_NS and self.lag_ns <= BEHIND_REPORT_NS:

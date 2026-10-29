@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import diagram as diagrams
+from . import wire
 from .clock import Clock, utc_now_ns
 from .graph import SchemaError
 from .jcs import MAX_SAFE_INTEGER, configuration_digest, dumps, loads
@@ -185,9 +186,13 @@ class ControlPlane:
         max_chunk_bytes: int = MAX_CHUNK_BYTES,
         max_transfer_bytes: int = 64 * 1024 * 1024,
         prepare_ttl_s: float = PREPARE_TTL_S,
+        streams=None,
+        data=None,
         log=print,
     ):
         self.descriptor = descriptor
+        self.data = data  # transport.DataEndpoint: checks the data peers of a deployment
+        self.streams = streams  # transport.StreamTable of the node's data streams, if it has a data plane
         self.host = host  # DeploymentHost: stage(), activate(), execution_state(), timing()
         self.clock = clock
         self.state_dir = state_dir
@@ -315,8 +320,9 @@ class ControlPlane:
                       "target_triple": d.target_triple},
             control_limits={"max_configuration_bytes": self.max_configuration_bytes,
                             "max_chunk_bytes": self.max_chunk_bytes, "max_transfer_bytes": self.max_transfer_bytes},
-            # No data plane yet: no packet versions, no header extensions.
-            data_protocol={"packet_versions": [], "extensions": []},
+            # The data protocol this node speaks (wire draft section 12.1 item 4).
+            data_protocol={"packet_versions": list(wire.SUPPORTED_PACKET_VERSIONS),
+                           "extensions": [f"0x{e:04X}" for e in wire.SUPPORTED_EXTENSIONS]},
             clock_sync={"synchronized": sync.synchronized, "max_error_ns": sync.max_error_ns,
                         "estimated_error_ns": sync.estimated_error_ns, "source": sync.source,
                         "max_error_bound_ns": self.clock.max_error_bound_ns, "usable": usable},
@@ -422,7 +428,7 @@ class ControlPlane:
         )
 
     def stream_status(self, request_id, request):
-        return self._response("STREAM_STATUS", request_id, streams=[])
+        return self._response("STREAM_STATUS", request_id, streams=self.streams.statuses() if self.streams else [])
 
     # ---- deployment ---------------------------------------------------------
 
@@ -542,7 +548,13 @@ class ControlPlane:
             if self.descriptor.node_uuid not in diagrams.placed_nodes(diagram):
                 raise SchemaError(f"No element of the diagram is placed on this node ({self.descriptor.node_uuid}).")
             node_schema = diagrams.extract_node_schema(diagram, self.descriptor.node_uuid)
-            staged = self.host.stage(node_schema, diagrams.model_time_step_ns(diagram))
+            data_peers = diagrams.producer_endpoints(diagram, self.descriptor.node_uuid)
+            if self.data is not None:
+                try:
+                    self.data.check_peers(data_peers)
+                except ValueError as ex:
+                    raise SchemaError(str(ex)) from None
+            staged = self.host.stage(node_schema, diagrams.model_time_step_ns(diagram), data_peers)
         except SchemaError as ex:
             return not_ready([self._issue("INVALID_CONFIGURATION", "configuration", deployment_id, str(ex))])
 
@@ -687,8 +699,12 @@ class ControlPlane:
         stream_id = request.get("stream_id")
         if not isinstance(stream_id, str) or len(stream_id) != 36 or stream_id.count("-") != 4:
             return error(request_id, "INVALID_REQUEST", "stream_id must be a UUID.")
-        # No data plane: this node has no streams to recover.
-        return self._response("RECOVER_STREAM_RESULT", request_id, stream_id=stream_id, recovered=False)
+        recovered = False
+        if self.streams is not None:
+            recovered = self.streams.recover(wire.parse_stream_id(stream_id))
+            if recovered:
+                self.host.resume()  # a graph stopped by the stream fault steps again
+        return self._response("RECOVER_STREAM_RESULT", request_id, stream_id=stream_id, recovered=recovered)
 
     # ---- configuration transfer ---------------------------------------------
 
@@ -820,7 +836,7 @@ class ControlPlane:
                 raise ValueError("configuration.diagram must be an object")
             node_schema = diagrams.extract_node_schema(diagram, self.descriptor.node_uuid)
             step_ns = diagrams.model_time_step_ns(diagram)
-            staged = self.host.stage(node_schema, step_ns)
+            staged = self.host.stage(node_schema, step_ns, diagrams.producer_endpoints(diagram, self.descriptor.node_uuid))
             # The next slot of the original activation time; steps missed while down are not caught up.
             original = record.get("activate_at_ns") if is_int(record.get("activate_at_ns")) else None
             activate_at = None

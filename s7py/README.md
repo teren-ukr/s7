@@ -12,12 +12,13 @@ It needs only the Python standard library (3.10+). TLS mode also needs the `cryp
 - **Execution**: a node's part of a diagram is validated as by `s7core` (parameters against each element's declaration, port indices, one driver per input, every input connected, cycles through causal memory, and one rate per connected set of elements: `../doc/S7_Sample_Rate_Model.md`), compiled into causal order and stepped. Causal memory publishes what it computed at the start of the next step, so every value read after a step belongs to that step; a step that fails leaves every published output as it was. A diagram with `dt` runs on a UTC grid from its activation time and catches up when behind; others run at `execution.step_rate_hz`.
 - **Rates**: an element with a time step (`EulerIntegrator`, `TrapezoidIntegrator` `dt`, `AnalogOscillator`, `StepGenerator` and `PWM` `sample_rate_hz`) pins the rate of everything connected to it. Elements that pin none take the deployed diagram's `dt`, or, in the startup graph, its own `dt`, else `execution.step_rate_hz`; a graph with neither is refused. In a deployed diagram every element's own rate must also equal its `dt`. A rate is the exact rational nearest to the configured binary64 value (so 0.0010000001 s and 0.0010000002 s differ, and 44.1 kHz stays 44.1 kHz), as `s7::Rate::from_seconds`.
 - **Elements** (F64 only): `Constant`, `Gain`, `Adder`, `Multiply`, `Delay`, `PreviousValue`, `Accumulator`, `EulerIntegrator`, `TrapezoidIntegrator` (implicit by default, all its states solved together each step, or `"mode": "sampled"`; `../s7l2/docs/TRAPEZOID_INTEGRATION.md`), `AnalogOscillator`, `StepGenerator`, `PWM`; stateless math and control: `Trig`, `Divider`, `MathFunction`, `Power`, `Saturation`, `MinMax`, `Sign`, `Comparator`, `Switch`, `PhaseWrap`; `HysteresisRelay`. Math is computed with the same libm functions as `s7core`, so results agree to the bit; where libm returns NaN or an infinity (`sin(inf)`, `pow(-0.0, -1)`, `exp(1000)`), so does s7py, but the sign of a NaN is not reproduced. Domain errors that `s7core` reports as execution errors (a zero `Divider` denominator, `sqrt` of a negative number, a non-finite `Switch` control, `PhaseWrap` or `HysteresisRelay` input, or `PWM` duty) stop execution likewise.
+- **Data streams** (`../doc/S7_Network_Wire_Protocol_v1.md`, `../doc/S7_Net_Element_Contract.md`): a connection between elements on different nodes is a stream, carried by a `NetSink` on the producer node and a `NetSource` on each consumer node, which the node adds to its part of the diagram as `s7net` does. The wire format (every type of section 8, 12-bit packing, `TIMESTAMPS` and `SEND_TIME` extensions, `ACK` / `RESUME`), batching, the send log with backpressure, cumulative acknowledgements, resume and replay, sequence-range reservations (`<state-dir>/streams/<stream_id>.seq`, the C++ node's format), timestamp profiles, end-to-end latency, `GET_STREAM_STATUS` and `RECOVER_STREAM` follow `s7transport`. A consumer node connects to each producer node's `/data` endpoint (`runtime_nodes[].data_endpoint`, else `endpoint`) over mTLS, announcing itself in the `S7-Node` handshake header, and RESUMEs its streams after every (re)connect; each stream is accepted only from its producer node and served only to its consumer nodes. The graph steps in a worker thread, so a `NetSource` can wait for data and a `NetSink` for room in the send log while the node keeps serving; a stream fault stops stepping until `RECOVER_STREAM`. s7py graphs carry F64 streams; the codec reads and writes every wire type. Not supported: a separate data listener and `trusted_plaintext` data (ADR-020, `../s7l2/docs/SPLIT_TRANSPORT.md`); this node refuses a deployment that needs them.
 - **State directory**: holds the node UUID (taken from the certificate's `spiffe://s7/node/<uuid>` SAN in TLS mode), the peer cache, and the active deployment, which is restored on restart. The directory is locked against a second process.
 - **Clock**: synchronization is read from the kernel (`ntp_adjtime`) on Linux. Use `"clock": {"assume_synchronized": true}` elsewhere or in tests.
 
 ## Not implemented
 
-- **Data plane** (`NetSink` / `NetSource`, wire protocol v1). `NODE_INFO` advertises no packet versions, and a node part containing a stream end is refused as `NOT_READY` (`INVALID_CONFIGURATION`). Each node must therefore run a self-contained part of a diagram.
+- A separate data listener and the `trusted_plaintext` data profile.
 - Signal types other than F64, nested schemas, plugins and schema libraries.
 - Outbound peer probing: seed peers and announcements are only listed.
 
@@ -51,7 +52,7 @@ Options: `python3 -m s7node --help`.
 python3 -m unittest discover -s tests
 ```
 
-`tools/check_control_fixtures.py` runs the control protocol conformance script (`../s7l2/s7runtime/tests/fixtures/control_v1.json`) against any node. `--skip-streams` leaves out the steps that need a data stream. The test suite runs it against this node over mTLS.
+`tools/check_control_fixtures.py` runs the control protocol conformance script (`../s7l2/s7runtime/tests/fixtures/control_v1.json`) against any node. `--skip-streams` leaves out the steps that need a data stream: they expect stream `5d4c3b2a-…`, which only the C++ fixture harness creates, so a live node (C++ or s7py) runs the script with it. The test suite runs it against this node over mTLS. `tests/test_wire.py` checks the codec against the shared wire fixtures (`../s7l2/s7transport/tests/fixtures/wire_v1.json`), `tests/test_stream.py` the delivery rules with the scenarios of `s7transport`'s `stream_protocol_smoke.cpp`, and `tests/test_transport.py` two endpoints over loopback WebSocket connections, including a dropped connection.
 
 ## Layout
 
@@ -60,7 +61,10 @@ python3 -m unittest discover -s tests
 | `s7node/control.py` | Control protocol messages, authorization, deployments, transfers, persistence |
 | `s7node/graph.py` | Elements, validation, causal ordering, stepping |
 | `s7node/runtime.py` | Executor: grid / rate pacing, scheduled activation |
-| `s7node/diagram.py` | A node's part of a deployed diagram |
+| `s7node/diagram.py` | A node's part of a deployed diagram, with its stream ends |
+| `s7node/wire.py` | Data stream wire format v1 |
+| `s7node/stream.py` | Stream descriptors, lossless delivery (producer, consumer, sequence reservations) |
+| `s7node/transport.py` | Stream table and `/data` connections between nodes |
 | `s7node/jcs.py` | RFC 8785 canonical JSON, configuration digest |
 | `s7node/websocket.py` | Minimal RFC 6455 server and client on asyncio |
 | `s7node/tls.py` | TLS contexts, certificate identity (fingerprint, SAN, EKU) |
