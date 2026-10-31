@@ -1572,6 +1572,16 @@ auto BeastRuntimeNetEndpoint::configure_server(const std::uint16_t port, const T
         context->use_private_key_file(tls.key_file, ssl::context::pem);
         context->load_verify_file(tls.ca_file);
         context->set_verify_mode(tls.require_client_cert ? (ssl::verify_peer | ssl::verify_fail_if_no_peer_cert) : ssl::verify_peer);
+        // With peer verification OpenSSL resumes a session only within a session id context;
+        // without one it refuses every resumed handshake with a fatal internal_error alert
+        // (JSSE clients resume on every reconnect). One context per kind of listener: a
+        // session keeps the verified client certificate, so it resumes only on a listener
+        // with the same policy.
+        const std::string_view session_context = channels == ListenerChannels::Data      ? "s7transport/data"
+                                                 : channels == ListenerChannels::Control ? "s7transport/control"
+                                                                                         : "s7transport/shared";
+        SSL_CTX_set_session_id_context(context->native_handle(), reinterpret_cast<const unsigned char*>(session_context.data()),
+                                       static_cast<unsigned int>(session_context.size()));
     }
     return impl_->run_on_io([&]() -> std::uint16_t {
         auto& slot = impl_->listeners[channels == ListenerChannels::Data ? 1 : 0];
