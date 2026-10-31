@@ -3,7 +3,8 @@
 
 // Streams over real WebSocket connections (BeastRuntimeNetEndpoint): both
 // directions, lossless resume across dropped TCP connections, two consumers
-// with their own mTLS identities, malformed input and the inbound limit.
+// with their own mTLS identities, TLS session resumption, malformed input and
+// the inbound limit.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -27,8 +28,12 @@
 #endif
 
 #include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
 #include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
+#include <boost/beast/websocket/ssl.hpp>
+#include <openssl/ssl.h>
 
 #include <s7/transport.hpp>
 
@@ -607,6 +612,53 @@ void test_node_identity()
     expect(wait_for([&] { return consumer.stats().data_connections == 1; }), "the right node is accepted");
 }
 
+// A client that resumes its TLS session when it reconnects (as JSSE does by default) is
+// accepted: without a session id context the server refused the resumed handshake with a
+// fatal internal_error alert.
+void test_tls_session_resumption()
+{
+    namespace ssl = boost::asio::ssl;
+    namespace websocket = boost::beast::websocket;
+    transport::BeastRuntimeNetEndpoint node;
+    const auto port = node.configure_server(0, tls_for("s7_runtime_node"));
+    const auto client_tls = tls_for("s7_runtime_node_b");
+    ssl::context context(ssl::context::tls_client);
+    context.use_certificate_chain_file(client_tls.cert_file);
+    context.use_private_key_file(client_tls.key_file, ssl::context::pem);
+    context.load_verify_file(client_tls.ca_file);
+    context.set_verify_mode(ssl::verify_peer);
+    // An OpenSSL client keeps a TLS 1.3 session resumable only with client-side caching (as s_client -sess_out).
+    SSL_CTX_set_session_cache_mode(context.native_handle(), SSL_SESS_CACHE_CLIENT);
+    boost::asio::io_context io;
+
+    // Connects to /data, with a session to resume or none; returns the session and whether it was reused.
+    auto connect = [&](SSL_SESSION* resume) -> std::pair<SSL_SESSION*, bool> {
+        websocket::stream<ssl::stream<tcp::socket>> ws(io, context);
+        boost::asio::connect(boost::beast::get_lowest_layer(ws), tcp::resolver(io).resolve("127.0.0.1", std::to_string(port)));
+        if (resume) {
+            SSL_set_session(ws.next_layer().native_handle(), resume);
+        }
+        ws.next_layer().handshake(ssl::stream_base::client); // internal_error without the session id context
+        ws.handshake("127.0.0.1:" + std::to_string(port), "/data");
+        const bool reused = SSL_session_reused(ws.next_layer().native_handle()) == 1;
+        // The TLS 1.3 tickets came with the handshake response. A connection closed without
+        // close_notify invalidates its session, so the close is marked as a clean shutdown.
+        SSL_SESSION* session = SSL_get1_session(ws.next_layer().native_handle());
+        SSL_set_shutdown(ws.next_layer().native_handle(), SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
+        boost::system::error_code ignored;
+        boost::beast::get_lowest_layer(ws).close(ignored);
+        return {session, reused};
+    };
+
+    const auto [first, first_reused] = connect(nullptr);
+    expect(first != nullptr && !first_reused, "a full handshake at first");
+    expect(SSL_SESSION_is_resumable(first) == 1, "the server issued a resumable session");
+    const auto [second, second_reused] = connect(first);
+    expect(second_reused, "the reconnect resumed the session");
+    SSL_SESSION_free(first);
+    SSL_SESSION_free(second);
+}
+
 // A plain WebSocket server listens on loopback unless an address is given.
 void test_plain_server_binds_loopback()
 {
@@ -808,6 +860,7 @@ try {
     test_mutual_streams_over_two_connections();
     test_data_peer_retried();
     test_node_identity();
+    test_tls_session_resumption();
     test_separate_listeners();
     test_plain_server_binds_loopback();
     test_plain_consumers_on_two_nodes();
