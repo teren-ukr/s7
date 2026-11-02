@@ -13,6 +13,7 @@ The project is in pre-MVP development. APIs, file formats and protocols may stil
 | [`doc/`](doc/README.md) | Language-neutral documentation: vision, formal model, architecture, terminology, architectural decisions, and the control and data-stream protocols that every implementation speaks |
 | [`s7l2/`](s7l2/README.md) | C++26 reference implementation: core model and compiler, headless runtime `s7runtime`, transport and lossless data streams, `s7ctl` command-line tool, element plugins, and the Qt6 Studio. Builds on Linux, and cross-builds for Windows on Linux |
 | [`s7py/`](s7py/README.md) | Minimal headless node in Python (standard library only): the control protocol, deployments over mTLS, and execution of a subset of the built-in elements, F64 only. It has no data streams yet |
+| [`s7java/`](s7java/README.md) | Minimal data node in Java (standard library only, Java 21+): the data stream wire format and lossless delivery over mTLS, and its part of a deployed diagram, F64 only. It has no control plane yet: its part comes from a deployed diagram file |
 
 The implementations interoperate through the protocols in `doc/`. Their conformance data lives in `s7l2/s7runtime/tests/fixtures/` (control protocol) and `s7l2/s7transport/tests/fixtures/` (wire format). For example, Studio or `s7ctl` can deploy a diagram to a Python node.
 
