@@ -1262,10 +1262,19 @@ struct BeastRuntimeNetEndpoint::Impl : std::enable_shared_from_this<BeastRuntime
         table.changed.notify_all();
     }
 
+    // Called on every publish, by graph threads. At most one pump waits in the
+    // I/O queue: a graph stepping faster than the I/O thread runs handlers would
+    // otherwise queue one per element, and write completions, ACKs and batch
+    // flushes would wait behind them. The flag is cleared before the pump reads
+    // the streams, so data published after that schedules the next pump.
     void schedule_pump()
     {
+        if (pump_scheduled.exchange(true)) {
+            return;
+        }
         boost::asio::post(io, [weak = weak_from_this()] {
             if (const auto self = weak.lock()) {
+                self->pump_scheduled.store(false);
                 for (const auto& connection : self->connections) {
                     if (connection->is_data && !connection->closed) {
                         self->apply_pending_resumes(*connection);
@@ -1765,6 +1774,7 @@ struct BeastRuntimeNetEndpoint::Impl : std::enable_shared_from_this<BeastRuntime
     boost::asio::thread_pool control_pool{1};
     std::thread io_thread;
     boost::asio::steady_timer tick_timer{io};
+    std::atomic<bool> pump_scheduled{false}; // see schedule_pump()
     std::unique_ptr<stream::SequenceStore> sequences;
     StreamTable table;
 

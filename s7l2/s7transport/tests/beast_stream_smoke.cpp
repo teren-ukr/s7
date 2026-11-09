@@ -912,10 +912,84 @@ void test_latency_over_websocket()
            "late packets are reported without stopping the stream");
 }
 
+// A graph that steps as fast as it can publishes one element per step (NetSink). Each
+// publish asks the I/O thread to send; if every request queued a handler of its own, write
+// completions, ACKs and batch flushes would wait behind millions of them and the stream would
+// all but stop while the producer runs flat out.
+void test_one_element_publishes_keep_flowing()
+{
+    const auto certs = std::filesystem::path(S7_TEST_CERT_DIR);
+    auto tls = [&](const char* name) {
+        transport::TlsConfig t;
+        t.enabled = true;
+        t.cert_file = (certs / (std::string(name) + ".cert.pem")).string();
+        t.key_file = (certs / (std::string(name) + ".key.pem")).string();
+        t.ca_file = (certs / "s7_root_ca.cert.pem").string();
+        return t;
+    };
+    transport::BeastRuntimeNetEndpoint server;
+    transport::BeastRuntimeNetEndpoint client;
+    const auto port = server.configure_server(0, tls("s7_runtime_node"));
+    client.configure_client("wss://127.0.0.1:" + std::to_string(port), tls("s7_runtime_node_b"));
+    auto fast = config("4e3f7c0a-1b5d-4e9f-8d6f-8c4a5f6e7d8b");
+    fast.max_elements_per_packet = 1024;
+    fast.send_log_max_packets = 4096;
+    const auto producer = server.open_producer(fast);
+    const auto consumer = client.open_consumer(fast);
+    constexpr std::size_t kCount = 2'000'000;
+    constexpr std::size_t kChunk = 1024;
+    std::string failure;        // written by the reader thread only
+    std::string publish_failure; // written by this thread only
+    std::atomic<bool> reader_done{false}; // the reader stopped early: stop publishing
+    const auto start = std::chrono::steady_clock::now();
+    double longest_gap_ms = 0; // the longest wait for the next 1024 values
+    std::thread reader([&] {
+        std::vector<double> chunk(kChunk);
+        auto last = std::chrono::steady_clock::now();
+        for (std::size_t base = 0; base < kCount; base += kChunk) {
+            const auto want = std::min(kChunk, kCount - base);
+            const auto result = client.receive(consumer, chunk.data(), want);
+            const auto now = std::chrono::steady_clock::now();
+            longest_gap_ms = std::max(longest_gap_ms, std::chrono::duration<double, std::milli>(now - last).count());
+            last = now;
+            if (result.fault != stream::FaultCode::None || result.received != want) {
+                failure = "consumer faulted at " + std::to_string(base) + ": " + stream::to_string(result.fault);
+                reader_done.store(true);
+                return;
+            }
+            for (std::size_t i = 0; i < want; ++i) {
+                if (chunk[i] != static_cast<double>(base + i)) {
+                    failure = "consumer got " + std::to_string(chunk[i]) + " at " + std::to_string(base + i);
+                    reader_done.store(true);
+                    return;
+                }
+            }
+        }
+    });
+    for (std::size_t i = 0; i < kCount && !reader_done.load(); ++i) {
+        const double value = static_cast<double>(i);
+        const auto result = server.publish(producer, &value, 1);
+        if (result.fault != stream::FaultCode::None) {
+            publish_failure = "publish faulted at " + std::to_string(i) + ": " + stream::to_string(result.fault);
+            break;
+        }
+    }
+    reader.join();
+    const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    expect(failure.empty(), failure);
+    expect(publish_failure.empty(), publish_failure);
+    std::cout << "one-element publishes: " << kCount << " values in " << seconds << " s, longest gap " << longest_gap_ms << " ms\n";
+    // Measured on a laptop: about 5 ms with one pump queued at a time, 2.5 to 2.8 s (the whole
+    // publishing time) with a pump per publish.
+    expect(longest_gap_ms < 500.0, "values keep arriving while the producer publishes flat out: longest gap " +
+                                       std::to_string(longest_gap_ms) + " ms");
+}
+
 } // namespace
 
 int main()
 try {
+    test_one_element_publishes_keep_flowing();
     test_both_directions();
     test_stream_packet_limit_over_websocket();
     test_small_packets_are_not_delayed();
